@@ -1,7 +1,7 @@
 #[derive(Debug, Clone)]
 pub enum Rule {
     Terminal(String),
-    NonTerminal(String, Option<String>),
+    NonTerminal(String, String),
 }
 
 impl ToString for Rule {
@@ -32,7 +32,7 @@ impl Grammar {
                     + " → "
                     + &match d {
                         Rule::Terminal(t) => t.clone(),
-                        Rule::NonTerminal(nt1, nt2) => format!("{}{}", nt1, nt2.clone().unwrap_or("".to_owned())),
+                        Rule::NonTerminal(nt1, nt2) => format!("{}{}", nt1, nt2),
                     })
                 .collect::<Vec<String>>()
                 .join(","),
@@ -48,15 +48,6 @@ pub struct ParseResult {
 pub trait ParseGrammar {
     fn parse_grammar(&self, g: &Grammar) -> ParseResult;
 }
-
-// fn render_table(table: &Vec<Vec<Vec<String>>>) {
-//     for row in table {
-//         for col in row {
-//             print!("{: >5}|", col.join(" "));
-//         }
-//         println!();
-//     }
-// }
 
 impl ParseGrammar for &str {
     fn parse_grammar(&self, g: &Grammar) -> ParseResult {
@@ -85,11 +76,11 @@ impl ParseGrammar for &str {
             for i in (0..=j).rev() {
                 // for (let k = i; k <= j; k++) {
                 for k in i..=j {
-                    for (lhs, rhs) in g.rules.clone() {
+                    for (lhs, rhs) in g.rules.iter() {
                         if let Rule::NonTerminal(a, b) = rhs {
-                            if table[i][k].contains(&a) && k + 1 < n && b.is_some() && table[k + 1][j].contains(&b.unwrap())
+                            if table[i][k].contains(&a) && k + 1 < n && table[k + 1][j].contains(&b)
                             {
-                                table[i][j].push(lhs);
+                                table[i][j].push(lhs.clone());
                             }
                         }
                     }

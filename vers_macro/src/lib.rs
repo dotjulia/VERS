@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 #![feature(proc_macro_diagnostic)]
 extern crate proc_macro;
+
 use proc_macro::{
     token_stream::IntoIter, Delimiter, Diagnostic, Ident, Level, TokenStream, TokenTree,
 };
@@ -190,11 +191,154 @@ fn parse_rules(
     ret_val
 }
 
+fn eliminate_start_rhs(rules: &mut Vec<(String, Vec<String>)>, start_symbol: &mut String, x_count: &mut u32) {
+    // if start symbol occurs on rhs
+    if rules.iter().any(|(_, r)| r.contains(start_symbol)) {
+        rules.push((format!("𝑋{}", x_count), vec![start_symbol.clone()]));
+        *start_symbol = format!("𝑋{}", x_count);
+        *x_count += 1;
+    }
+}
+
+fn remove_null_productions(rules: &mut Vec<(String, Vec<String>)>, terminals: &Vec<(Ident, String, String)>) {
+    // eliminate empty terminals
+    if terminals.iter().any(|(_, _, t)| t == "") {
+        let mut empty_terminals = Vec::new();
+        for (_, t, literal) in terminals.iter() {
+            if literal == "" {
+                empty_terminals.push(t.clone());
+            }
+        }
+        // find all nonterminals which could produce empty terminals
+        let mut nullable_nonterminals: Vec<String> = Vec::new();
+        for (nt, t) in rules.iter() {
+            if empty_terminals.iter().any(|e| t.contains(e)) {
+                nullable_nonterminals.push(nt.clone());
+            }
+        }
+
+        let mut added_nullable = true;
+        while added_nullable {
+            added_nullable = false;
+            for (nt, r) in rules.iter() {
+                if !nullable_nonterminals.iter().any(|n| n == nt) {
+                    if r.iter().all(|e| nullable_nonterminals.contains(e)) {
+                        nullable_nonterminals.push(nt.clone());
+                        added_nullable = true;
+                    }
+                }
+            }
+        }
+        for nullable in nullable_nonterminals {
+            let mut new_rules: Vec<(String, Vec<String>)> = Vec::new();
+            for (nt, rule) in rules.iter() {
+                // figure out all permutations
+                let nullable_in_rule_cnt = rule.iter().filter(|e| **e == nullable).count();
+                for cnt_nullable_to_remove in 1..=nullable_in_rule_cnt {
+                    for j in 0..rule.len() {
+                        if rule[j] != nullable {
+                            continue;
+                        }
+                        if rule[j..].iter().filter(|f| **f == nullable).count() < cnt_nullable_to_remove {
+                            continue;
+                        }
+                        let mut new_rule = Vec::new();
+                        let mut cnt_added = 0;
+                        for i in 0..j {
+                            new_rule.push(rule[i].clone());
+                        }
+                        for i in j..rule.len() {
+                            if nullable != rule[i] || cnt_added >= cnt_nullable_to_remove {
+                                new_rule.push(rule[i].clone());
+                                cnt_added += 1;
+                            }
+                        }
+                        if new_rule.len() > 0 {
+                            new_rules.push((nt.clone(), new_rule));
+                        }
+                    }
+                }
+            }
+            rules.append(&mut new_rules);
+        }
+        rules.dedup();
+        *rules = rules.iter().filter(|(_, r)| !empty_terminals.contains(&r.join(""))).map(|e| e.clone()).collect();
+    }
+}
+
+fn eliminate_unit_rules(rules: &mut Vec<(String, Vec<String>)>, terminals: &Vec<(Ident, String, String)>) {
+    let filter_condition = |(_, r): &&(String, Vec<String>)| r.len() == 1 && !terminals.iter().any(|(_, t, _)| t == &r[0]);
+    let mut new_rules: Vec<(String, Vec<String>)> = Vec::new();
+    for rule in rules.iter().filter(filter_condition) {
+        for (nt, r) in rules.iter() {
+            if nt == &rule.1[0] {
+                new_rules.push((rule.0.clone(), r.clone()));
+            }
+        }
+    }
+    // *rules = rules.iter().filter(filter_condition).map(|e| e.clone()).collect();
+    rules.append(&mut new_rules);
+    rules.retain(|(_, r)| r.len() > 1 || terminals.iter().any(|t| t.1 == r[0]));
+    rules.dedup();
+}
+
+fn maximum_two_rules(rules: &mut Vec<(String, Vec<String>)>, x_count: &mut u32) {
+    let mut new_rules: Vec<(String, Vec<String>)> = Vec::new();
+    for (_, r) in rules.iter_mut() {
+        while r.len() > 2 {
+            let new_nt = if let Some(existing_rule) = new_rules.iter().find(|(_, rtf)| rtf.len() == 2 && rtf[0] == r[0] && rtf[1] == r[1]) {
+                existing_rule.0.clone()
+            } else {
+                let new_nt = format!("𝑋{}", x_count);
+                *x_count += 1;
+                new_rules.push((new_nt.clone(), vec![r[0].clone(), r[1].clone()]));
+                new_nt
+            };
+            r[0] = new_nt;
+            r.remove(1);
+        }
+    }
+    rules.append(&mut new_rules);
+}
+
+fn eliminate_terminal_rules(rules: &mut Vec<(String, Vec<String>)>, terminals: &Vec<(Ident, String, String)>, x_count: &mut u32) {
+    let mut new_rules: Vec<(String, Vec<String>)> = Vec::new();
+    for (_, r) in rules.iter_mut() {
+        if r.len() == 2 && terminals.iter().any(|(_, t, _)| t == &r[0] || t == &r[1]) {
+            let terminal1 = terminals.iter().find(|(_, t, _)| t == &r[0]);
+            let terminal2 = terminals.iter().find(|(_, t, _)| t == &r[1]);
+            let mut replace_terminal = |terminal: String| {
+                let replacing_rule = if let Some(existing_rule) = new_rules.iter().find(|(_, rtf)| rtf[0] == terminal) {
+                    existing_rule.0.clone()
+                } else {
+                    let new_nt = format!("𝑋{}", x_count);
+                    *x_count += 1;
+                    new_rules.push((new_nt.clone(), vec![terminal.clone()]));
+                    new_nt
+                };
+                if r[0] == terminal {
+                    r[0] = replacing_rule;
+                } else {
+                    r[1] = replacing_rule;
+                }
+            };
+            if let Some(terminal) = terminal1 {
+                replace_terminal(terminal.1.clone());
+            }
+            if let Some(terminal) = terminal2 {
+                replace_terminal(terminal.1.clone());
+            }
+        }
+    }
+    rules.append(&mut new_rules);
+}
+
 #[proc_macro]
 #[allow(non_snake_case)]
 pub fn VΣRS(item: TokenStream) -> TokenStream {
     let mut iter = item.into_iter();
     let grammar_name = get_string(&mut iter);
+    let debug = grammar_name == "DEBUG";
     consume(&mut iter, "=".to_owned(), None);
     let mut iter = consume_group(
         &mut iter,
@@ -211,7 +355,7 @@ pub fn VΣRS(item: TokenStream) -> TokenStream {
     consume(&mut iter, "V".to_owned(), error_v.clone());
     consume(&mut iter, "=".to_owned(), error_v.clone());
     let mut iter_nonterminal = consume_group(&mut iter, Delimiter::Brace, error_v).unwrap();
-    let mut nonterminals = get_list_of_identifier(&mut iter_nonterminal);
+    let nonterminals = get_list_of_identifier(&mut iter_nonterminal);
     nonterminals.iter().for_each(|(s, i)| {
         if !s.chars().all(|c| c.is_uppercase()) {
             Diagnostic::spanned(
@@ -258,7 +402,7 @@ pub fn VΣRS(item: TokenStream) -> TokenStream {
     consume(&mut iter, "R".to_owned(), error_r.clone());
     consume(&mut iter, "=".to_owned(), error_r.clone());
     let mut iter_rules = consume_group(&mut iter, Delimiter::Brace, error_r).unwrap();
-    let mut rules = parse_rules(&mut iter_rules, &nonterminals);
+    let rules = parse_rules(&mut iter_rules, &nonterminals);
     consume(
         &mut iter,
         ",".to_owned(),
@@ -274,45 +418,13 @@ pub fn VΣRS(item: TokenStream) -> TokenStream {
         "=".to_owned(),
         Some("Expected '=' to assign start symbol".to_owned()),
     );
-    let start_symbol = get_string(&mut iter);
-    let mut new_rules: Vec<(String, String)> = Vec::new();
+    let mut start_symbol = get_string(&mut iter);
     // this is the best code i've ever written, trust me
-    let backup_rules = rules.clone();
     let mut x_count = 0;
-    // replace all terminals in rules
-    rules.iter_mut().for_each(|(_, rule, _)| {
-        terminals.iter().for_each(|(_, t, _)| {
-            if rule.contains(t){
-                if rule.len() != t.len() {
-                    if let Some((new_nt, _, _)) = backup_rules.iter().find(|(_, rule, _)| rule == t)
-                    {
-                        *rule = rule.replace(t, &new_nt.clone());
-                        return;
-                    }
-                    if let Some((new_nt, _)) = new_rules.iter().find(|(_, rule)| rule == t) {
-                        *rule = rule.replace(t, &new_nt.clone());
-                        return;
-                    }
-                    let new_terminal = format!("𝑋{}", x_count);
-                    x_count += 1;
-                    nonterminals.push((new_terminal.clone(), None));
-                    *rule = rule.replace(t, &new_terminal);
-                    new_rules.push((new_terminal.clone(), t.clone()));
-                }
-            }
-        });
-    });
-    new_rules.iter().for_each(|(nt, t)| {
-        rules.push((nt.clone(), t.clone(), None));
-    });
-    // transform rules into a vector of tuples of the form (nonterminal, (nonterminal, nonterminal)) and (nonterminal, terminal)
-    let mut nonterminalrules = Vec::<(String, (String, Option<String>))>::new();
-    let mut terminalrules = Vec::<(String, String)>::new();
-    for (nonterminal, rule, ident) in rules {
-        if terminals.iter().any(|(_, t, _)| t == &rule) {
-            terminalrules.push((nonterminal, rule.clone()));
-            continue;
-        }
+
+    let mut tokenized_rules = Vec::new();
+    // tokenize rules
+    for (nonterminal, rule, ident) in rules.iter() {
         let mut token = String::new();
         let iter = rule.chars();
         let mut nts = Vec::new();
@@ -322,79 +434,61 @@ pub fn VΣRS(item: TokenStream) -> TokenStream {
                 nts.push(token);
                 token = String::new();
             }
-        }
-        if nts.len() == 1 {
-            if let Some(ident) = ident.clone() {
-                Diagnostic::spanned(
-                    ident.span(),
-                    Level::Error,
-                    "Rhs of a rule should contain at least 2 nonterminals",
-                )
-                .emit();
-            } else {
-                Diagnostic::spanned(
-                    proc_macro::Span::call_site(),
-                    Level::Error,
-                    "Rhs of a rule should contain at least 2 nonterminals",
-                )
-                .emit();
+            if terminals.iter().any(|(_, s1, _)| s1 == &token) {
+                nts.push(token);
+                token = String::new();
             }
-        } else if nts.len() == 2 {
-            nonterminalrules.push((nonterminal, (nts[0].clone(), Some(nts[1].clone()))));
-        } else if nts.len() > 2 {
-            // create new rule for 𝑋{x_count}
-            while nts.len() > 2 {
-                let new_nt = format!("𝑋{}", x_count);
-                x_count += 1;
-                nonterminals.push((new_nt.clone(), None));
-                nonterminalrules.push((new_nt.clone(), (nts[0].clone(), Some(nts[1].clone()))));
-                nts.remove(0);
-                nts.remove(0);
-                nts.insert(0, new_nt);
-            }
-            nonterminalrules.push((nonterminal, (nts[0].clone(), Some(nts[1].clone()))));
         }
+
+        // throw error if not tokenized correctly
         if token.len() > 0 {
             if let Some(ident) = ident {
                 Diagnostic::spanned(
                     ident.span(),
                     Level::Error,
-                    format!("non-terminal/terminal '{}' is not defined in the grammar", token),
+                    format!("Unexpected token '{}'", token),
                 )
                 .emit();
             } else {
                 Diagnostic::spanned(
                     proc_macro::Span::call_site(),
                     Level::Error,
-                    format!("non-terminal/terminal '{}' is not defined in the grammar", token),
-                )
-                .emit();
+                    format!("Unexpected token '{}'", token),
+                );
             }
         }
+        tokenized_rules.push((nonterminal.clone(), nts));
     }
-    if nonterminalrules.iter().any(|(_, (n1, n2))| n1 == &start_symbol || n2 == &Some(start_symbol.clone())) {
-        nonterminalrules.push((format!("𝑋{}", x_count), (start_symbol.clone(), None)));
-        // x_count += 1;
+
+    eliminate_start_rhs(&mut tokenized_rules, &mut start_symbol, &mut x_count);
+    if debug {
+        println!("Eliminate Start: {:?} S = {}", tokenized_rules, start_symbol);
     }
-    if terminals.iter().any(|(_, _, t)| t == "") {
-        //TODO: eliminate empty terminals
-        // find nonterminals which produce empty terminals
-        // find nonterminals which produce nonterminals which produce empty terminals
-        // ...
-        todo!();
+    remove_null_productions(&mut tokenized_rules, &terminals);
+    if debug {
+        println!("Eliminate Null Productions: {:?} S = {}", tokenized_rules, start_symbol);
     }
-    let transform_nonterminalrule = |(nt, (nt1, nt2))| {
-        let nt2: Option<String> = nt2;
-        if nt2.is_some() {
-            return format!(r#"("{}".to_owned(), Rule::NonTerminal("{}".to_owned(), Some("{}".to_owned())))"#, nt, nt1, nt2.unwrap());
+    eliminate_unit_rules(&mut tokenized_rules, &terminals);
+    if debug {
+        println!("Eliminate Unit Rules: {:?} S = {}", tokenized_rules, start_symbol);
+    }
+    maximum_two_rules(&mut tokenized_rules, &mut x_count);
+    if debug {
+        println!("RHS max 2: {:?} S = {}", tokenized_rules, start_symbol);
+    }
+    eliminate_terminal_rules(&mut tokenized_rules, &terminals, &mut x_count);
+    if debug {
+        println!("Eliminate mixed terminal rules: {:?} S = {}", tokenized_rules, start_symbol);
+    }
+
+    let transform_rule = |(nt, rule): (String, Vec<String>)| {
+        if rule.len() == 2 {
+            return format!(r#"("{}".to_owned(), Rule::NonTerminal("{}".to_owned(), "{}".to_owned()))"#, nt, rule[0], rule[1]);
         } else {
-            return format!(r#"("{}".to_owned(), Rule::NonTerminal("{}".to_owned(), None))"#, nt, nt1);
+            return format!(r#"("{}".to_owned(), Rule::Terminal("{}".to_owned()))"#, nt, rule.join(""));
         }
     };
 
-    let transform_terminalrule = |(nt, t)| {
-        return format!(r#"("{}".to_owned(), Rule::Terminal("{}".to_owned()))"#, nt, t);
-    };
 
     format!(
         r#"let {}: Grammar = Grammar {{
@@ -403,14 +497,9 @@ pub fn VΣRS(item: TokenStream) -> TokenStream {
         start_symbol: "{}",
     }};"#,
         grammar_name,
-        nonterminalrules
+        tokenized_rules
             .iter()
-            .map(|m| transform_nonterminalrule(m.clone()))
-            .chain(
-                terminalrules
-                    .iter()
-                    .map(|m| transform_terminalrule(m.clone()))
-            )
+            .map(|m| transform_rule(m.clone()))
             .collect::<Vec<String>>()
             .join(","),
         terminals.iter().map(|(_, s1, s2)| format!(r#"("{}".to_owned(), "{}".to_owned())"#, s1, s2)).collect::<Vec<String>>().join(","),
